@@ -41,9 +41,6 @@ namespace EasyServerBrowser {
         socket_set(NULL),
         lan_announce_socket(NULL),
         started(false),
-        announce_server(false),
-        last_announce(0),
-        update_count(0),
         announce_channel(-1)
     {
         
@@ -52,6 +49,7 @@ namespace EasyServerBrowser {
     bool ServerBrowser::Start(std::string game_name_magic) {
 
         int ret = 0;
+        IPaddress udp_address;
 
         if (started) {
             WARNING("Already started");
@@ -74,14 +72,10 @@ namespace EasyServerBrowser {
             return false;
         }
 
-        lan_announce_socket = SDLNet_UDP_Open(ServerBrowser::LAN_ANNOUNCE_UDP_PORT);
+        lan_announce_socket = SDLNet_UDP_Open(ServerAdvertisement::LAN_ANNOUNCE_UDP_PORT);
         if (!lan_announce_socket) {
             FAILURE("SDLNet_UDP_Open: %s", SDLNet_GetError());
-            lan_announce_socket = SDLNet_UDP_Open(ServerBrowser::LAN_ANNOUNCE_UDP_PORT+1);
-            if (!lan_announce_socket) {
-                FAILURE("SDLNet_UDP_Open: %s", SDLNet_GetError());
-                return false;
-            }
+            return false;
         }
 
         ret = SDLNet_UDP_AddSocket(socket_set, lan_announce_socket);
@@ -90,7 +84,7 @@ namespace EasyServerBrowser {
             return false;
         }
 
-        ret = SDLNet_ResolveHost(&udp_address,"255.255.255.255",ServerBrowser::LAN_ANNOUNCE_UDP_PORT);
+        ret = SDLNet_ResolveHost(&udp_address,"255.255.255.255",ServerAdvertisement::LAN_ANNOUNCE_UDP_PORT);
         if(ret == -1) {
             FAILURE("SDLNet_ResolveHost: %s", SDLNet_GetError());
             return false;
@@ -125,10 +119,10 @@ namespace EasyServerBrowser {
         INFO("Stopping server browser");
 
         started = false;
-        announce_server = false;
-        local_server_params.clear();
-
-        FAILURE("TODO");
+        if (lan_announce_socket) {
+            SDLNet_UDP_Close(lan_announce_socket);
+            lan_announce_socket = NULL;
+        }
     }
 
     UDPpacket * ServerBrowser::GetPacket() {
@@ -202,7 +196,9 @@ namespace EasyServerBrowser {
     void ServerBrowser::Update() {
         int ret = 0;
 
-        if (!started) return;
+        if (!started) {
+            return;
+        }
 
         ret = SDLNet_CheckSockets(socket_set, 0);
         if (ret == -1) {
@@ -226,24 +222,7 @@ namespace EasyServerBrowser {
             }
         }
 
-        //TODO: Try announce
-        if (announce_server
-            && last_announce + ANNOUNCE_RATE <= update_count)
-        {
-            last_announce = update_count;
-            UDPpacket * packet = GetPacket();
-            if (packet) {
-
-                size_t header_length = header_string.length();
-                memcpy(packet->data, header_string.c_str(), header_length);
-                packet->len = header_length;
-
-                SDLNet_UDP_Send(lan_announce_socket, announce_channel, packet);
-
-                ReturnPacket(packet);
-            }
-        }
-        update_count++;
+        
     }
 
     void ServerBrowser::Refresh(server_browser_type_t server_browser_type) {
@@ -256,15 +235,6 @@ namespace EasyServerBrowser {
                 internet_servers.clear();
                 break;
         }
-    }
-
-    void ServerBrowser::AnnounceServer(ServerEntry::server_entry_param_map_t & params) {
-        announce_server = true;
-        local_server_params = params;
-    }
-
-    void ServerBrowser::StopAnnouncingServer() {
-        announce_server = false;
     }
 
     ServerBrowser::server_entry_map_t ServerBrowser::GetList(server_browser_type_t server_browser_type) {
@@ -282,6 +252,115 @@ namespace EasyServerBrowser {
 
     void ServerBrowser::RegisterForUpdates(sigc::slot<void> slot) {
         notify_update = slot;
+    }
+
+    ServerAdvertisement::ServerAdvertisement() :
+        lan_announce_socket(NULL),
+        started(false),
+        last_announce(0),
+        announce_channel(-1),
+        local_server_params(),
+        header_string()
+    {
+        
+    }
+
+    bool ServerAdvertisement::Start(
+        std::string game_name_magic,
+        ServerEntry::server_entry_param_map_t & params)
+    {
+        int ret = 0;
+        IPaddress udp_address;
+
+        local_server_params = params;
+
+        if (started) {
+            WARNING("Server advertisement already started");
+            return false;
+        }
+
+        header_string = "easy_server_browser/";
+        header_string += game_name_magic;
+
+        ret = SDLNet_Init();
+        if(ret == -1)
+        {
+            FAILURE("SDLNet_Init: %s",SDLNet_GetError());
+            return false;
+        }
+
+        lan_announce_socket = SDLNet_UDP_Open(0);
+        if (!lan_announce_socket) {
+            FAILURE("SDLNet_UDP_Open: %s", SDLNet_GetError());
+            return false;
+        }
+
+        ret = SDLNet_ResolveHost(&udp_address,"255.255.255.255",ServerAdvertisement::LAN_ANNOUNCE_UDP_PORT);
+        if(ret == -1) {
+            FAILURE("SDLNet_ResolveHost: %s", SDLNet_GetError());
+            return false;
+        }
+
+        INFO("Host %#08x", udp_address.host);
+        //udp_address.host = INADDR_BROADCAST;
+
+        ret = SDLNet_UDP_Bind(lan_announce_socket, -1, &udp_address);
+        if (ret == -1) {
+            FAILURE("SDLNet_UDP_Bind: %s", SDLNet_GetError());
+            return false;
+        } else {
+            INFO("Bound channel %d", ret);
+            announce_channel = ret;
+        }
+
+        started = true;
+        INFO("Server anouncer started");
+
+        return true;
+    }
+
+    void ServerAdvertisement::Stop() {
+        if (!started) {
+            return;
+        }
+        started = false;
+        if (lan_announce_socket) {
+            SDLNet_UDP_Close(lan_announce_socket);
+            lan_announce_socket = NULL;
+        }
+        local_server_params.clear();
+    }
+
+    void ServerAdvertisement::Update() {
+        if (!started)
+            return;
+
+        //TODO: Try announce
+        if (last_announce + ANNOUNCE_RATE <= update_count)
+        {
+            last_announce = update_count;
+            UDPpacket * packet = GetPacket();
+            if (packet) {
+
+                size_t header_length = header_string.length();
+                memcpy(packet->data, header_string.c_str(), header_length);
+                packet->len = header_length;
+
+                SDLNet_UDP_Send(lan_announce_socket, announce_channel, packet);
+
+                ReturnPacket(packet);
+            }
+        }
+        update_count++;
+    }
+
+    UDPpacket * ServerAdvertisement::GetPacket() {
+        return SDLNet_AllocPacket(1024);
+    }
+
+    void ServerAdvertisement::ReturnPacket(UDPpacket * packet) {
+        CHECK(packet,);
+        SDLNet_FreePacket(packet);
     }
 
 }
