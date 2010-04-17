@@ -11,7 +11,7 @@
 #include <SDL/SDL_net.h>
 #include <map>
 #include <string>
-#include <list>
+
 
 #include <sigc++/sigc++.h>
 
@@ -53,6 +53,9 @@ namespace EasyServerBrowser {
         
         bool started;
         std::string header_string;
+        std::string game_name_magic;
+    
+        bool use_http;
 
         int announce_channel;
 
@@ -76,6 +79,8 @@ namespace EasyServerBrowser {
             server_browser_type_lan,
         } server_browser_type_t;
         
+        void SetUseHTTP(bool use_http);
+        
         //request the passed function be called when the server list has been updated
         void RegisterForUpdates(sigc::slot<void> slot);
 
@@ -97,6 +102,7 @@ namespace EasyServerBrowser {
         
         time_t last_internet_announce;
         bool announce_internet;
+        bool use_http;
 
         int announce_channel;
         int internet_announce_channel;
@@ -105,16 +111,22 @@ namespace EasyServerBrowser {
 
         static const int ANNOUNCE_RATE = 5;
         static const int INTERNET_ANNOUNCE_RATE = 30;
-        std::string header_string;
+        //std::string header_string;
         std::string game_name_magic;
+        std::string json_cache;
 
         UDPpacket * GetPacket();
         void ReturnPacket(UDPpacket * packet);
+        
+        static void * HTTPAnnounce(void * context);
         
     public:
         ServerAdvertisement();
 
         static const int LAN_ANNOUNCE_UDP_PORT = 42077;
+    
+        void SetAnnounceInternet(bool announce_internet);
+        void SetAnnounceHTTP(bool use_http);
 
         bool Start(
             std::string game_name_magic,

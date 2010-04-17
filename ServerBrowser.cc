@@ -1,5 +1,8 @@
 #include <pthread.h>
 #include <SDL/SDL_net.h>
+#include <assert.h>
+#include <list>
+#include <vector>
 
 #include "ServerBrowser.h"
 #include "ServerBrowserUtil.h"
@@ -91,6 +94,7 @@ namespace EasyServerBrowser {
         socket_set(NULL),
         lan_announce_socket(NULL),
         started(false),
+        use_http(true),
         announce_channel(-1)
     {
     }
@@ -276,6 +280,7 @@ namespace EasyServerBrowser {
 
         header_string = EASY_SERVER_MAGIC;
         header_string += game_name_magic;
+        this->game_name_magic = game_name_magic;
 
         ret = SDLNet_Init();
         if(ret == -1)
@@ -536,15 +541,28 @@ namespace EasyServerBrowser {
         map.clear();
     }
     
+    void ServerBrowser::SetUseHTTP(bool use_http) {
+        this->use_http = use_http;
+    }
+    
     void * ServerBrowser::DownloadMasterServerList(void* context) {
     
         ServerBrowser * sb = (ServerBrowser*)context;
         IPaddress ip;
         int ret;
+        const char * master_list_server_address = "localhost"; //"afaucher.gotdns.com";
+        const char * master_server_http_file = "/serverlist.cgi";
+        uint16_t port = InternetMasterServer::INTERNET_MASTER_SERVER_LIST_PORT;
+        
+        CHECK(sb,NULL);
+        
+        if (sb->use_http) {
+            port = 80;
+        }
         
         ret = SDLNet_ResolveHost(&ip,
-            "afaucher.gotdns.com",
-            InternetMasterServer::INTERNET_MASTER_SERVER_LIST_PORT);
+            master_list_server_address,
+            port);
         if(ret==-1) {
             FAILURE("SDLNet_ResolveHost: %s", SDLNet_GetError());
             return NULL;;
@@ -561,6 +579,33 @@ namespace EasyServerBrowser {
         size_t buffer_size = 64*1024;
         size_t offset = 0;
         
+        if (sb->use_http) {
+            char http_request_header[1024];
+#define HTTP_LF "\r\n"
+            snprintf(http_request_header,
+                1024,
+                "GET %s?game=%s HTTP/1.1" HTTP_LF
+                "Host: %s" HTTP_LF
+                "Accept: text/html" HTTP_LF
+                HTTP_LF,
+                master_server_http_file,
+                sb->game_name_magic.c_str(),
+                master_list_server_address);
+            //INFO("%s", http_request_header);
+            offset = 0;
+            do {
+                ret = SDLNet_TCP_Send(server_list_socket, &http_request_header[offset], 1024-offset);
+                if (ret <= 0) {
+                    if (ret < 0) {
+                        FAILURE("SDLNet_TCP_Send: %s", SDLNet_GetError());
+                    }
+                    break;
+                }
+                offset += ret;
+            } while (ret > 0 && ((1024-offset) > 0));
+        }
+        
+        offset = 0;
         do {
             ret = SDLNet_TCP_Recv(server_list_socket, &server_list_buffer[offset], buffer_size-offset);
             if (ret <= 0) {
@@ -572,11 +617,38 @@ namespace EasyServerBrowser {
             offset += ret;
             
         } while (ret > 0 && ((buffer_size-offset) > 0));
-        INFO("\"%s\" " SIZE_T_FORMAT, server_list_buffer, offset);
+        
+        uint8_t * json_start = server_list_buffer;
+        size_t json_size = offset;
+        
+        if (sb->use_http) {
+            if (memcmp((const char *)json_start, "HTTP", std::min(json_size, strlen("HTTP"))) == 0) {
+                INFO("HTTP response found");
+                
+                const char * http_header_end_string = HTTP_LF HTTP_LF;
+                void * http_header_end = memmem(json_start, json_size,
+                    http_header_end_string, strlen(http_header_end_string));
+                
+                if (!http_header_end) {
+                    FAILURE("Failed to find end of http header");
+                    return NULL;
+                }
+                
+                size_t header_length = (uint8_t*)http_header_end - json_start;
+                header_length += strlen(http_header_end_string);
+                json_start += header_length;
+                json_size -= header_length;
+            } else {
+                FAILURE("Failed to find HTTP response");
+                return NULL;
+            }
+        }
+        
+        //INFO("\"%*s\"", (int)json_size, json_start);
         
         server_entry_map_t internet_servers = EasyServerBrowser::ServerBrowser::ParseServerList(
-            server_list_buffer, 
-            offset);
+            json_start, 
+            json_size);
             
         pthread_mutex_lock(&pending_internet_servers_mutex);
         
@@ -652,24 +724,32 @@ namespace EasyServerBrowser {
         last_announce(0),
         last_internet_announce(0),
         announce_internet(true),
+        use_http(true),
         announce_channel(-1),
         internet_announce_channel(-1),
         local_server_params(),
-        header_string(),
         game_name_magic()
     {
         
+    }
+    
+    void ServerAdvertisement::SetAnnounceInternet(bool announce_internet)
+    {
+        this->announce_internet = announce_internet;
+    }
+    
+    void ServerAdvertisement::SetAnnounceHTTP(bool use_http)
+    {
+        this->use_http = use_http;
     }
 
     void ServerAdvertisement::UpdateAdvertisement(const ServerEntry::server_entry_param_map_t & params)
     {
         local_server_params = params;
         
-        header_string = EASY_SERVER_MAGIC;
-        header_string += game_name_magic;
-        header_string += ":[";
-        header_string += ServerEntry::GetJSON(local_server_params);
-        header_string += "]";
+        json_cache = "[";
+        json_cache += ServerEntry::GetJSON(local_server_params);
+        json_cache += "]";
         
         last_internet_announce = 0;
         last_announce = 0;
@@ -691,9 +771,6 @@ namespace EasyServerBrowser {
             WARNING("Server advertisement already started");
             return false;
         }
-
-        header_string = EASY_SERVER_MAGIC;
-        header_string += game_name_magic;
         
 
         ret = SDLNet_Init();
@@ -748,9 +825,9 @@ namespace EasyServerBrowser {
         started = true;
         INFO("Server anouncer started");
         
-        header_string += ":[";
-        header_string += ServerEntry::GetJSON(local_server_params);
-        header_string += "]";
+        json_cache = "[";
+        json_cache += ServerEntry::GetJSON(local_server_params);
+        json_cache += "]";
 
         return true;
     }
@@ -766,6 +843,79 @@ namespace EasyServerBrowser {
         }
         local_server_params.clear();
     }
+    
+    void * ServerAdvertisement::HTTPAnnounce(void * context) {
+        //ServerAdvertisement * sa = (ServerAdvertisement*)context;
+        char * post = (char*)context;
+        IPaddress ip;
+        int ret;
+        const char * master_list_server_address = "localhost"; //"afaucher.gotdns.com";
+        const char * master_server_http_file = "/list/actions/announce_server.php";
+        uint16_t port = 80;
+        uint8_t server_list_buffer[64*1024] = {};
+        size_t buffer_size = 64*1024;
+        TCPsocket server_list_socket = NULL;
+        int post_size = 0;
+        size_t offset;
+        
+        CHECK(post,NULL);
+        
+        ret = SDLNet_ResolveHost(&ip,
+            master_list_server_address,
+            port);
+        if(ret==-1) {
+            FAILURE("SDLNet_ResolveHost: %s", SDLNet_GetError());
+            goto end;
+        }
+        
+        server_list_socket = SDLNet_TCP_Open(&ip);
+        if (!server_list_socket) {
+            FAILURE("SDLNet_TCP_Open: %s", SDLNet_GetError());
+            goto end;
+        }
+        
+        snprintf((char*)server_list_buffer, 
+            buffer_size,
+            "POST %s HTTP/1.1" HTTP_LF
+            "Host: %s" HTTP_LF
+            "Content-Type: application/x-www-form-urlencoded" HTTP_LF
+            "Content-Length: " SIZE_T_FORMAT HTTP_LF
+            "Accept: text/html" HTTP_LF
+            HTTP_LF
+            "%s%n",
+            master_server_http_file,
+            master_list_server_address,
+            strlen(post),
+            post,
+            &post_size);
+        //INFO("%.*s", post_size, server_list_buffer);
+        SDLNet_TCP_Send(server_list_socket, server_list_buffer, post_size);
+        
+        offset = 0;
+        do {
+            
+            ret = SDLNet_TCP_Recv(server_list_socket, &server_list_buffer[offset], buffer_size);
+            if (ret > 0) offset += ret;
+        } while (ret > 0);
+        
+        //INFO("%.*s", offset, server_list_buffer);
+        
+        SDLNet_TCP_Close(server_list_socket);
+        
+    end:
+        free(post);
+        
+        return NULL;
+    }
+    
+    void http_encode(std::string & url) {
+        do {
+            size_t pos = url.find(' ', 0);
+            if (pos == url.npos) break;
+            url.replace(pos, 1, "+");
+            
+        } while (1);
+    }
 
     void ServerAdvertisement::Update() {
         if (!started)
@@ -778,6 +928,7 @@ namespace EasyServerBrowser {
             last_announce = now;
             UDPpacket * packet = GetPacket();
             if (packet) {
+                std::string header_string = EASY_SERVER_MAGIC + game_name_magic + ":" + json_cache;
                 size_t header_length = header_string.length();
                 memcpy(packet->data, header_string.c_str(), header_length);
                 packet->len = header_length;
@@ -788,20 +939,35 @@ namespace EasyServerBrowser {
             }
         }
         if (announce_internet
-            && last_internet_announce + INTERNET_ANNOUNCE_RATE <= now)
+            && last_internet_announce + ServerAdvertisement::INTERNET_ANNOUNCE_RATE <= now)
         {
-            INFO("%s", 
-                header_string.c_str());
             last_internet_announce = now;
-            UDPpacket * packet = GetPacket();
             
-            if (packet) {
-                size_t header_length = header_string.length();
-                memcpy(packet->data, header_string.c_str(), header_length);
-                packet->len = header_length;
-
-                SDLNet_UDP_Send(lan_announce_socket, internet_announce_channel, packet);
-                ReturnPacket(packet);
+            //INFO("Internet Announce");
+            if (use_http) {
+                std::string post;
+                std::string json_cache_encoded = json_cache;
+                http_encode(json_cache_encoded);
+                post += "game=";
+                post += game_name_magic.c_str();
+                post += "&json=";
+                
+                post += json_cache_encoded;
+                
+                pthread_create_detached( ServerAdvertisement::HTTPAnnounce, strdup(post.c_str()) );
+            } else {
+                std::string header_string = EASY_SERVER_MAGIC + game_name_magic + ":" + json_cache;
+                //INFO("%s", header_string.c_str());
+                UDPpacket * packet = GetPacket();
+                
+                if (packet) {
+                    size_t header_length = header_string.length();
+                    memcpy(packet->data, header_string.c_str(), header_length);
+                    packet->len = header_length;
+    
+                    SDLNet_UDP_Send(lan_announce_socket, internet_announce_channel, packet);
+                    ReturnPacket(packet);
+                }
             }
         }
     }
