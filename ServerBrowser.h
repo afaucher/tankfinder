@@ -110,7 +110,7 @@ namespace EasyServerBrowser {
         ServerEntry::server_entry_param_map_t local_server_params;
 
         static const int ANNOUNCE_RATE = 5;
-        static const int INTERNET_ANNOUNCE_RATE = 30;
+        static const int INTERNET_ANNOUNCE_RATE = 60;
         //std::string header_string;
         std::string game_name_magic;
         std::string json_cache;

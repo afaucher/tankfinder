@@ -11,6 +11,45 @@
 
 #define EASY_SERVER_MAGIC "easy_server_browser/"
 #define EASY_SERVER_MAGIC_LENGTH strlen(EASY_SERVER_MAGIC)
+//#define IMSL_ADDRESS "afaucher.gotdns.com"
+#define IMSL_ADDRESS "tankfinderhttp.sourceforge.net"
+//#define IMSL_ADDRESS "localhost"
+#define IMSL_GET_SERVER_LIST_PATH "/actions/server_list.php"
+#define IMSL_ANNOUNCE_SERVER_PATH "/actions/announce_server.php"
+
+#ifndef _GNU_SOURCE
+static void *
+memmem(
+     const void *haystack,
+     size_t haystack_len,
+     const void *needle,
+     size_t needle_len)
+{
+  const char *begin;
+  const char *const last_possible
+    = (const char *) haystack + haystack_len - needle_len;
+
+  if (needle_len == 0)
+    /* The first occurrence of the empty string is deemed to occur at
+       the beginning of the string.  */
+    return (void *) haystack;
+
+  /* Sanity check, otherwise the loop might search through the whole
+     memory.  */
+  if (__builtin_expect (haystack_len < needle_len, 0))
+    return NULL;
+
+  for (begin = (const char *) haystack; begin <= last_possible; ++begin)
+    if (begin[0] == ((const char *) needle)[0] &&
+    !memcmp ((const void *) &begin[1],
+         (const void *) ((const char *) needle + 1),
+         needle_len - 1))
+      return (void *) begin;
+
+  return NULL;
+}
+#endif
+
 
 namespace EasyServerBrowser {
 
@@ -550,8 +589,8 @@ namespace EasyServerBrowser {
         ServerBrowser * sb = (ServerBrowser*)context;
         IPaddress ip;
         int ret;
-        const char * master_list_server_address = "localhost"; //"afaucher.gotdns.com";
-        const char * master_server_http_file = "/serverlist.cgi";
+        const char * master_list_server_address = IMSL_ADDRESS;
+        const char * master_server_http_file = IMSL_GET_SERVER_LIST_PATH;
         uint16_t port = InternetMasterServer::INTERNET_MASTER_SERVER_LIST_PORT;
         
         CHECK(sb,NULL);
@@ -644,7 +683,7 @@ namespace EasyServerBrowser {
             }
         }
         
-        //INFO("\"%*s\"", (int)json_size, json_start);
+        INFO("\"%*s\"", (int)json_size, json_start);
         
         server_entry_map_t internet_servers = EasyServerBrowser::ServerBrowser::ParseServerList(
             json_start, 
@@ -794,7 +833,7 @@ namespace EasyServerBrowser {
 
         INFO("Host %#08x", udp_address.host);
         
-        ret = SDLNet_ResolveHost(&internet_udp_address,"afaucher.gotdns.com",InternetMasterServer::INTERNET_MASTER_SERVER_REGISTER_PORT);
+        ret = SDLNet_ResolveHost(&internet_udp_address,IMSL_ADDRESS,InternetMasterServer::INTERNET_MASTER_SERVER_REGISTER_PORT);
         if(ret == -1) {
             FAILURE("SDLNet_ResolveHost: %s", SDLNet_GetError());
             return false;
@@ -849,8 +888,8 @@ namespace EasyServerBrowser {
         char * post = (char*)context;
         IPaddress ip;
         int ret;
-        const char * master_list_server_address = "localhost"; //"afaucher.gotdns.com";
-        const char * master_server_http_file = "/list/actions/announce_server.php";
+        const char * master_list_server_address = IMSL_ADDRESS;
+        const char * master_server_http_file = IMSL_ANNOUNCE_SERVER_PATH;
         uint16_t port = 80;
         uint8_t server_list_buffer[64*1024] = {};
         size_t buffer_size = 64*1024;
@@ -898,7 +937,16 @@ namespace EasyServerBrowser {
             if (ret > 0) offset += ret;
         } while (ret > 0);
         
-        //INFO("%.*s", offset, server_list_buffer);
+        if (strncmp((char*)server_list_buffer, "HTTP/1.1 200 OK", std::min(strlen("HTTP/1.1 200 OK"), offset)) != 0) {
+            FAILURE("%.*s", (int)offset, server_list_buffer);
+        } else {
+            const char * status_ok = HTTP_LF HTTP_LF "ok";
+            if (memmem(server_list_buffer, offset, status_ok, strlen(status_ok)) == NULL) {
+                WARNING("%.*s", (int)offset, server_list_buffer);
+            } else {
+                //INFO("%.*s", (int)offset, server_list_buffer);
+            }
+        }
         
         SDLNet_TCP_Close(server_list_socket);
         
